@@ -1,5 +1,5 @@
 // 优先用网络（保证拿到最新版本），断网时用缓存
-const CACHE = 'skincare-cabinet-v2';
+const CACHE = 'skincare-cabinet-v3';
 const FILES = ['./', 'index.html', 'style.css', 'app.js', 'manifest.json', 'icon.svg', 'icon-180.png', 'icon-512.png'];
 
 self.addEventListener('install', e => {

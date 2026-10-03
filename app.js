@@ -24,8 +24,10 @@ const STATUS = {
   stock:    '囤货',
   finished: '已用完',
   dropped:  '弃用',
+  wish:     '心愿单',
 };
-const STATUS_ORDER = ['using', 'stock', 'finished', 'dropped'];
+const STATUS_ORDER = ['using', 'stock', 'finished', 'dropped']; // 已拥有的；心愿单单独放
+const owned = () => state.products.filter(p => p.status !== 'wish');
 const PAO_OPTIONS = [3, 6, 9, 12, 18, 24, 36];
 
 // ============ 存储（IndexedDB，只存在本机） ============
@@ -68,6 +70,7 @@ const state = {
   filter: 'all',
   query: '',
   routine: new Date().getHours() < 15 ? 'am' : 'pm',
+  statsYear: new Date().getFullYear(),
 };
 
 // ============ 工具 ============
@@ -77,6 +80,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const pad = n => String(n).padStart(2, '0');
 const toDateStr = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const todayStr = () => toDateStr(new Date());
+const money = n => '¥' + (Math.round(n * 100) / 100).toLocaleString('zh-CN');
 const parseDate = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
 const fmtDate = s => { if (!s) return ''; const d = typeof s === 'string' ? parseDate(s) : s; return `${d.getFullYear()}.${d.getMonth() + 1}.${d.getDate()}`; };
 const find = id => state.products.find(p => p.id === id);
@@ -98,7 +102,7 @@ function addMonths(dateStr, months) {
 
 // 实际到期日 = min(未开封保质期, 开封日 + 开封后保质期)
 function expiryInfo(p) {
-  if (p.status === 'finished' || p.status === 'dropped') return null;
+  if (p.status !== 'using' && p.status !== 'stock') return null;
   const candidates = [];
   if (p.expiryDate) candidates.push({ date: parseDate(p.expiryDate), source: 'shelf' });
   if (p.openedDate && p.pao) candidates.push({ date: addMonths(p.openedDate, Number(p.pao)), source: 'pao' });
@@ -234,24 +238,24 @@ function viewHome() {
 
 function libraryList() {
   const q = state.query.trim().toLowerCase();
-  let list = state.products.filter(p => state.filter === 'all' || p.status === state.filter);
+  let list = state.filter === 'all' ? owned() : state.products.filter(p => p.status === state.filter);
   if (q) {
     list = list.filter(p =>
       [p.name, p.brand, CAT[p.category]?.name, p.notes].join(' ').toLowerCase().includes(q));
   }
   list.sort((a, b) =>
     STATUS_ORDER.indexOf(a.status) - STATUS_ORDER.indexOf(b.status) || (b.updatedAt || 0) - (a.updatedAt || 0));
-  return list.length
-    ? list.map(card).join('')
-    : `<p class="muted center">${state.products.length ? '没有符合的产品' : '还没有产品，点右上角 + 添加'}</p>`;
+  if (list.length) return list.map(card).join('');
+  if (state.filter === 'wish' && !q) return `<p class="muted center">想买的产品先记在这里，点右上角 + 添加</p>`;
+  return `<p class="muted center">${state.products.length ? '没有符合的产品' : '还没有产品，点右上角 + 添加'}</p>`;
 }
 
 function viewLibrary() {
-  const count = s => s === 'all' ? state.products.length : state.products.filter(p => p.status === s).length;
+  const count = s => s === 'all' ? owned().length : state.products.filter(p => p.status === s).length;
   return `
     <div class="search"><input id="search" type="search" placeholder="搜索名称、品牌、品类、备注" value="${esc(state.query)}"></div>
     <div class="chips">
-      ${['all', ...STATUS_ORDER].map(s =>
+      ${['all', ...STATUS_ORDER, 'wish'].map(s =>
         `<button class="chip ${state.filter === s ? 'on' : ''}" data-filter="${s}">${s === 'all' ? '全部' : STATUS[s]} <small>${count(s)}</small></button>`
       ).join('')}
     </div>
@@ -315,7 +319,97 @@ function viewSettings() {
       <p class="muted">清空后无法恢复，建议先导出备份。</p>
       <button class="btn danger" id="clearBtn">清空所有数据</button>
     </div>
-    <p class="muted small center" style="margin-top:20px">共 ${state.products.length} 件产品</p>
+    <p class="muted small center" style="margin-top:20px">共 ${owned().length} 件产品${state.products.length > owned().length ? ` · 心愿单 ${state.products.length - owned().length} 件` : ''}</p>
+  `;
+}
+
+const yearOf = d => (d ? Number(d.slice(0, 4)) : null);
+// 没填购买日期的，按添加日期算
+const boughtDate = p => p.purchaseDate || (p.createdAt ? toDateStr(new Date(p.createdAt)) : '');
+const spendOf = p => (parseFloat(p.price) || 0) * qtyOf(p);
+
+function emptyRow(p) {
+  const used = p.openedDate && p.finishedDate
+    ? Math.max(1, Math.round((parseDate(p.finishedDate) - parseDate(p.openedDate)) / 86400000)) : null;
+  const sub = [fmtDate(p.finishedDate) + ' 用完', used && `用了 ${used} 天`].filter(Boolean).join(' · ');
+  const rep = p.repurchase === 'yes' ? '<span class="badge st-using">会回购</span>'
+    : p.repurchase === 'no' ? '<span class="badge st-finished">不回购</span>' : '';
+  return `<button class="card empty-row" data-id="${p.id}">
+    ${thumb(p, 'thumb sm')}
+    <div class="card-body">
+      <div class="card-title">${esc(p.name)}</div>
+      <div class="card-sub">${esc(sub)}</div>
+      ${rep ? `<div class="card-tags">${rep}</div>` : ''}
+    </div>
+  </button>`;
+}
+
+function viewStats() {
+  const mine = owned();
+  const years = new Set([new Date().getFullYear()]);
+  mine.forEach(p => {
+    const b = yearOf(boughtDate(p)); if (b) years.add(b);
+    const f = yearOf(p.finishedDate); if (f) years.add(f);
+  });
+  const Y = state.statsYear;
+  const bought = mine.filter(p => yearOf(boughtDate(p)) === Y);
+  const spend = bought.reduce((n, p) => n + spendOf(p), 0);
+  const boughtCount = bought.reduce((n, p) => n + qtyOf(p), 0);
+  const empties = mine.filter(p => p.status === 'finished' && yearOf(p.finishedDate) === Y)
+    .sort((a, b) => b.finishedDate.localeCompare(a.finishedDate));
+  const droppedCount = mine.filter(p => p.status === 'dropped' && yearOf(p.finishedDate) === Y).length;
+  const decided = empties.filter(p => p.repurchase);
+  const rate = decided.length
+    ? Math.round(decided.filter(p => p.repurchase === 'yes').length / decided.length * 100) + '%' : '—';
+
+  const months = Array(12).fill(0);
+  bought.forEach(p => { months[Number(boughtDate(p).slice(5, 7)) - 1] += spendOf(p); });
+  const maxMonth = Math.max(...months);
+
+  const byCat = {};
+  bought.forEach(p => { byCat[p.category] = (byCat[p.category] || 0) + spendOf(p); });
+  const cats = Object.entries(byCat).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+  const maxCat = cats.length ? cats[0][1] : 0;
+
+  return `
+    ${years.size > 1 ? `<div class="chips year-chips">${[...years].sort((a, b) => b - a).map(y =>
+      `<button class="chip ${y === Y ? 'on' : ''}" data-year="${y}">${y}</button>`).join('')}</div>` : ''}
+    <div class="panel">
+      <span class="muted small">${Y} 年护肤花费</span>
+      <div class="hero-num">${money(spend)}</div>
+      <span class="muted small">买了 ${boughtCount} 件${bought.some(p => !p.price) ? ' · 有些产品没填价格' : ''}</span>
+    </div>
+    <div class="mini-stats">
+      <div class="stat"><b>${empties.length}</b><span>用空（瓶）</span></div>
+      <div class="stat"><b>${rate}</b><span>回购率</span></div>
+      <div class="stat"><b>${droppedCount}</b><span>弃用</span></div>
+      <div class="stat"><b>${state.products.filter(p => p.status === 'wish').length}</b><span>心愿单</span></div>
+    </div>
+
+    <div class="panel">
+      <h3>每月花费</h3>
+      ${maxMonth ? `
+        <p class="chart-readout" id="readout">点一下柱子看当月金额</p>
+        <div class="bars" id="bars" role="img" aria-label="${Y} 年每月花费">
+          ${months.map((v, i) => `<button class="bar-col" data-month="${i}" data-amount="${v}" aria-label="${i + 1}月 ${money(v)}">
+            <span class="bar" style="height:${v / maxMonth * 100}%"></span></button>`).join('')}
+        </div>
+        <div class="bar-labels">${months.map((_, i) => `<span>${i + 1}</span>`).join('')}</div>`
+      : `<p class="muted">${Y} 年还没有带价格的购买记录</p>`}
+    </div>
+
+    ${cats.length ? `<div class="panel">
+      <h3>按品类</h3>
+      <div class="cat-rows">${cats.map(([c, v]) => `<div class="cat-row">
+        <span>${CAT[c]?.emoji || ''} ${CAT[c]?.name || '其他'}</span>
+        <div class="cat-track"><div class="cat-fill" style="width:${v / maxCat * 100}%"></div></div>
+        <span class="amt">${money(v)}</span>
+      </div>`).join('')}</div>
+    </div>` : ''}
+
+    <h2 class="sec">🫙 空瓶记录 · ${empties.length} 瓶</h2>
+    ${empties.length ? `<div class="list">${empties.map(emptyRow).join('')}</div>`
+      : `<p class="muted">${Y} 年还没有用空的产品，加油～</p>`}
   `;
 }
 
@@ -323,6 +417,7 @@ const VIEWS = {
   home:     { title: '护肤柜', render: viewHome },
   library:  { title: '产品库', render: viewLibrary },
   routine:  { title: '护肤流程', render: viewRoutine },
+  stats:    { title: '统计', render: viewStats },
   settings: { title: '设置', render: viewSettings },
 };
 
@@ -335,7 +430,7 @@ function applyTheme() {
   if (pref === 'light' || pref === 'dark') root.dataset.theme = pref;
   else delete root.dataset.theme;
   const dark = pref === 'dark' || (pref !== 'light' && darkQuery.matches);
-  $('#themeColor').setAttribute('content', dark ? '#1c1716' : '#f8f3ee');
+  $('#themeColor').setAttribute('content', dark ? '#141a17' : '#f5f8f4');
 }
 
 function render() {
@@ -401,10 +496,14 @@ function openDetail(id) {
         <button data-qty="1" aria-label="增加一瓶">+</button>
       </div>
     </div>`;
+  } else if (p.status === 'wish') {
+    actions = `<button class="btn" data-act="bought-stock">买到了，先囤着</button><button class="btn ghost" data-act="bought-use">买到了，直接用</button>`;
   } else {
+    const inWish = state.products.some(x => x.status === 'wish' && isSameProduct(x, p));
     actions = p.status === 'using'
       ? `<button class="btn" data-act="finish">用完了</button><button class="btn ghost" data-act="drop">不用了</button>`
-      : `<button class="btn" data-act="rebuy">再买一瓶</button>`;
+      : `<button class="btn" data-act="rebuy">再买一瓶</button>` +
+        (inWish || p.repurchase === 'no' ? '' : `<button class="btn ghost" data-act="wish">加入心愿单</button>`);
     const n = stockCount(p);
     stockLine = `<div class="stock-line">
       <span>${n ? `还囤着 <b>${n}</b> 瓶` : '没有囤货'}</span>
@@ -489,7 +588,9 @@ function defaultTimes(category) {
 }
 
 function openForm(p, isNew) {
-  const d = p || { status: 'using', category: 'serum', ...defaultTimes('serum') };
+  // 在产品库里筛选着「囤货 / 心愿单」时点 +，默认就是那个状态
+  const preset = state.tab === 'library' && ['using', 'stock', 'wish'].includes(state.filter) ? state.filter : 'using';
+  const d = p || { status: preset, category: 'serum', ...defaultTimes('serum') };
   let photo = d.photo || '';
   let timesTouched = !isNew;
 
@@ -525,7 +626,7 @@ function openForm(p, isNew) {
       </div>
       <div class="field">
         <span class="lbl">状态</span>
-        <div class="opts">${STATUS_ORDER.map(st => opt('status', st, STATUS[st], d.status === st)).join('')}</div>
+        <div class="opts">${[...STATUS_ORDER, 'wish'].map(st => opt('status', st, STATUS[st], d.status === st)).join('')}</div>
       </div>
       <div class="field" id="qtyField">
         <span class="lbl">囤了几瓶</span>
@@ -541,12 +642,13 @@ function openForm(p, isNew) {
           <label class="lbl" for="f-price">价格（元）</label>
           <input type="number" id="f-price" name="price" inputmode="decimal" min="0" step="0.01" value="${esc(d.price)}">
         </div>
-        <div class="field">
+        <div class="field" id="buyField">
           <label class="lbl" for="f-buy">购买日期</label>
           <input type="date" id="f-buy" name="purchaseDate" value="${esc(d.purchaseDate)}">
         </div>
       </div>
 
+      <div id="expiryFields">
       <h4 class="form-sec">保质期</h4>
       <div class="row2">
         <div class="field">
@@ -565,6 +667,7 @@ function openForm(p, isNew) {
           ${opt('pao', '', '不确定', !d.pao)}
         </div>
         <p class="hint">瓶身上开盖罐子图标里的数字，比如 12M = 12 个月</p>
+      </div>
       </div>
 
       <div id="finishedFields">
@@ -585,10 +688,12 @@ function openForm(p, isNew) {
         </div>
       </div>
 
-      <h4 class="form-sec">使用时段</h4>
-      <div class="opts" id="timeOpts">
-        ${opt('am', '1', '☀️ 早上', d.am, 'checkbox')}
-        ${opt('pm', '1', '🌙 晚上', d.pm, 'checkbox')}
+      <div id="timeFields">
+        <h4 class="form-sec">使用时段</h4>
+        <div class="opts">
+          ${opt('am', '1', '☀️ 早上', d.am, 'checkbox')}
+          ${opt('pm', '1', '🌙 晚上', d.pm, 'checkbox')}
+        </div>
       </div>
 
       <h4 class="form-sec">备注</h4>
@@ -611,6 +716,7 @@ function openForm(p, isNew) {
     const st = form.status.value;
     $('#finishedFields', s).style.display = (st === 'finished' || st === 'dropped') ? '' : 'none';
     $('#qtyField', s).style.display = st === 'stock' ? '' : 'none';
+    ['#buyField', '#expiryFields', '#timeFields'].forEach(id => { $(id, s).style.display = st === 'wish' ? 'none' : ''; });
   };
   drawPhoto();
   syncStatus();
@@ -670,7 +776,7 @@ function openForm(p, isNew) {
     // 自动补日期：改成使用中就记开封日，改成用完就记用完日
     if (p.status === 'using' && !p.openedDate) p.openedDate = todayStr();
     if ((p.status === 'finished' || p.status === 'dropped') && !p.finishedDate) p.finishedDate = todayStr();
-    if (p.status === 'using' || p.status === 'stock') { p.finishedDate = ''; p.repurchase = ''; }
+    if (!['finished', 'dropped'].includes(p.status)) { p.finishedDate = ''; p.repurchase = ''; }
 
     // 新增囤货时，如果已经囤着同一款，问要不要合并成一条
     if (isNew && p.status === 'stock') {
@@ -755,6 +861,34 @@ async function handleSheetClick(e) {
     };
     return openForm(copy, true);
   }
+  if (t.dataset.act === 'wish') {
+    await save({
+      id: uid(), createdAt: Date.now(), status: 'wish',
+      name: p.name, brand: p.brand, category: p.category, price: p.price, photo: p.photo, am: p.am, pm: p.pm, pao: p.pao,
+    });
+    render(); openDetail(p.id); toast('已加入心愿单');
+    return;
+  }
+  if (t.dataset.act === 'bought-stock') {
+    const existing = stockOf(p)[0];
+    if (existing) {
+      await save({ ...existing, qty: qtyOf(existing) + 1 });
+      await remove(p.id);
+      render(); openDetail(existing.id);
+    } else {
+      await save({ ...p, status: 'stock', qty: 1, purchaseDate: p.purchaseDate || todayStr() });
+      render(); openDetail(p.id);
+    }
+    toast('已放进囤货，可以点「编辑」补充保质期');
+    return;
+  }
+  if (t.dataset.act === 'bought-use') {
+    const opened = { ...p, status: 'using', qty: 1, purchaseDate: p.purchaseDate || todayStr(), openedDate: todayStr() };
+    await save(opened);
+    render();
+    if (opened.pao) { openDetail(opened.id); toast('开始用啦'); } else askPao(opened);
+    return;
+  }
   if (t.hasAttribute('data-pao')) {
     await save({ ...p, pao: Number(t.dataset.pao) });
     render(); openDetail(p.id);
@@ -815,8 +949,10 @@ function bindEvents() {
   $('#addBtn').addEventListener('click', () => openForm(null, true));
 
   $('#view').addEventListener('click', async e => {
-    const t = e.target.closest('[data-id],[data-filter],[data-routine],[data-goto],[data-goto-tab],[data-theme-pick],[data-add],#exportBtn,#clearBtn');
+    const t = e.target.closest('[data-id],[data-filter],[data-year],[data-month],[data-routine],[data-goto],[data-goto-tab],[data-theme-pick],[data-add],#exportBtn,#clearBtn');
     if (!t) return;
+    if (t.dataset.year) { state.statsYear = Number(t.dataset.year); return render(); }
+    if (t.dataset.month) return showMonth(t);
     if (t.dataset.gotoTab) { state.tab = t.dataset.gotoTab; render(); window.scrollTo(0, 0); return; }
     if (t.dataset.themePick) {
       if (t.dataset.themePick === 'auto') prefs.set('theme', ''); else prefs.set('theme', t.dataset.themePick);
@@ -839,6 +975,11 @@ function bindEvents() {
     }
   });
 
+  $('#view').addEventListener('mouseover', e => {
+    const b = e.target.closest('[data-month]');
+    if (b) showMonth(b);
+  });
+
   $('#view').addEventListener('input', e => {
     if (e.target.id !== 'search') return;
     state.query = e.target.value;
@@ -854,6 +995,13 @@ function bindEvents() {
 
   $('#sheet').addEventListener('click', handleSheetClick);
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet(); });
+}
+
+function showMonth(col) {
+  const bars = $('#bars');
+  bars.classList.add('has-on');
+  bars.querySelectorAll('.bar-col').forEach(c => c.classList.toggle('on', c === col));
+  $('#readout').innerHTML = `${Number(col.dataset.month) + 1} 月花了 <b>${money(Number(col.dataset.amount))}</b>`;
 }
 
 // ============ 启动 ============
